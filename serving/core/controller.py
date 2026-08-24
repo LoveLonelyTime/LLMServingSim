@@ -29,6 +29,10 @@ class Controller():
         """
         out = [""]
         while "Waiting" not in out[-1] and out[-1] != "Checking Non-Exited Systems ...\n":
+            exit_code = p.poll()
+            if exit_code is not None:
+                raise RuntimeError(f"ASTRA-Sim process {p.pid} has exited! Exit code {exit_code}")
+
             line = p.stdout.readline()
             # For debugging
             # print(line, end='')
@@ -42,6 +46,10 @@ class Controller():
             p.stdout.flush()
         print(out[-4], end='')
         print(out[-2], end='')
+
+        if (exit_code := p.wait()) != 0:
+            raise RuntimeError(f"ASTRA-Sim process has exited with non-zero exit code {exit_code}!")
+
         return out
 
     def write_flush(self, p, input):

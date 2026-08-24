@@ -433,7 +433,9 @@ def main():
         binary=os.path.join(astra_sim, "build/astra_analytical/build/AnalyticalAstra/bin/AnalyticalAstra")
     elif network_backend == 'ns3':
         network=_prepare_ns3_config(astra_sim, run_paths)
-        binary=os.path.join(astra_sim, "extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-default")
+        # Enable debug
+        # binary=os.path.join(astra_sim, "extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-default")
+        binary=os.path.join(astra_sim, "extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-debug")
     else:
         raise NotImplementedError("Only analytical and ns3 network backend are supported")
     memory=run_paths.memory_config
@@ -621,10 +623,10 @@ def main():
     workload = get_workload(None, None, event=True, inputs_root=run_paths.inputs_root)
     # run subprocess
     astra_args = [binary, "--workload-configuration="+workload, "--system-configuration="+system, "--network-configuration="+network, "--memory-configuration="+memory]
-    if start_npu_ids != "":
-        astra_args.append("--start-npu-ids="+start_npu_ids)
-    if end_npu_ids != "":
-        astra_args.append("--end-npu-ids="+end_npu_ids)
+    # if start_npu_ids != "":
+    #     astra_args.append("--start-npu-ids="+start_npu_ids)
+    # if end_npu_ids != "":
+    #     astra_args.append("--end-npu-ids="+end_npu_ids)
     if network_backend == 'ns3':
         astra_args.append("--logical-topology-configuration="+astra_sim+"/inputs/logical_topology/logical_8nodes_1D.json")
     p = subprocess.Popen(astra_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
@@ -1110,7 +1112,8 @@ def main():
                 next_arrival = router.get_next_pending_arrival()
                 if next_arrival is not None and next_arrival > current:
                     current = next_arrival
-            controller.write_flush(p, pass_msg)
+            # controller.write_flush(p, pass_msg)
+            controller.write_flush(p, "pass")
         
         # flush
         flush.stdout.flush()
