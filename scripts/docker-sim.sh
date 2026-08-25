@@ -20,6 +20,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"                    # .../LLMServingSim
 #   matplotlib    bench/core/plots.py, reached by `python -m bench validate`
 docker run --name servingsim_docker \
   -it \
+  --privileged \
   -v "$REPO_ROOT":/app/LLMServingSim \
   -w /app/LLMServingSim \
   astrasim/tutorial-micro2024 \

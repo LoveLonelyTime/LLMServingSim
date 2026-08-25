@@ -31,6 +31,8 @@ import sys as flush
 
 from pyinstrument import Profiler
 
+ZMQ_ADDR = "tcp://localhost:5555"
+
 
 def _pad_batch_to_max(batch, max_len):
     """Pad a batch up to ``max_len`` for DP-sync.
@@ -126,7 +128,7 @@ def _cleanup_inputs_root(run_paths, logger):
     logger.info("Removed ASTRA-Sim inputs root: %s", inputs_root)
 
 
-def _prepare_ns3_config(astra_sim, run_paths):
+def _prepare_ns3_config(astra_sim, run_paths, topo_config):
     template = os.path.join(astra_sim, "extern/network_backend/ns-3/scratch/config/config.txt")
     output_dir = os.path.join(run_paths.inputs_root, "ns3", "output")
     config_path = os.path.join(run_paths.inputs_root, "ns3", "config.txt")
@@ -134,6 +136,7 @@ def _prepare_ns3_config(astra_sim, run_paths):
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
     replacements = {
+        "TOPOLOGY_FILE": os.path.join(astra_sim, topo_config),
         "FLOW_FILE": os.path.join(output_dir, "flow.txt"),
         "TRACE_FILE": os.path.join(output_dir, "trace.txt"),
         "TRACE_OUTPUT_FILE": os.path.join(output_dir, "mix.tr"),
@@ -262,6 +265,10 @@ def main():
     
     parser.add_argument('--cluster-config', type=str, default='configs/cluster/single_node_single_instance.json',
                         help='path to cluster config JSON defining node topology, instance layout, hardware, and memory hierarchy')
+    parser.add_argument('--topo-config', type=str, default='extern/network_backend/ns-3/scratch/topology/8_nodes_1_switch_topology.txt',
+                        help='path to ns3 config defining physical node topology')
+    parser.add_argument('--logical-topo-config', type=str, default='inputs/logical_topology/logical_8nodes_1D.json',
+                        help='path to ns3 config defining logical node topology')
     parser.add_argument('--max-num-seqs', type=int, default=128,
                         help='maximum number of sequences in a batch (0 = unlimited)')
     parser.add_argument('--max-num-batched-tokens', type=int, default=2048,
@@ -432,7 +439,7 @@ def main():
         network=run_paths.network_config
         binary=os.path.join(astra_sim, "build/astra_analytical/build/AnalyticalAstra/bin/AnalyticalAstra")
     elif network_backend == 'ns3':
-        network=_prepare_ns3_config(astra_sim, run_paths)
+        network=_prepare_ns3_config(astra_sim, run_paths, args.topo_config)
         # Enable debug
         # binary=os.path.join(astra_sim, "extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-default")
         binary=os.path.join(astra_sim, "extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-debug")
@@ -564,7 +571,7 @@ def main():
     print_rule()
 
     # Controller for astra-sim process communication
-    controller = Controller(total_npu)
+    controller = Controller(total_npu, ZMQ_ADDR)
     # Global Request Router
     router = Router(num_instances, schedulers, num_req, request_routing_policy)
     # Power Modeling if enabled
@@ -592,6 +599,7 @@ def main():
     last_end_time = [0 for _ in range(num_instances)]
     last_calc_time = [0 for _ in range(num_instances)]
     waiting_request = [False for _ in range(num_instances)]
+    on_doing = [False for _ in range(total_npu)]
 
     # Calculating Simulator's Throughput
     throughput = []
@@ -622,14 +630,14 @@ def main():
     # set first workload file
     workload = get_workload(None, None, event=True, inputs_root=run_paths.inputs_root)
     # run subprocess
-    astra_args = [binary, "--workload-configuration="+workload, "--system-configuration="+system, "--network-configuration="+network, "--memory-configuration="+memory]
-    # if start_npu_ids != "":
-    #     astra_args.append("--start-npu-ids="+start_npu_ids)
-    # if end_npu_ids != "":
-    #     astra_args.append("--end-npu-ids="+end_npu_ids)
+    astra_args = [binary, "--zmq-addr="+ZMQ_ADDR, "--workload-configuration="+workload, "--system-configuration="+system, "--network-configuration="+network, "--memory-configuration="+memory]
+    if start_npu_ids != "":
+        astra_args.append("--start-npu-ids="+start_npu_ids)
+    if end_npu_ids != "":
+        astra_args.append("--end-npu-ids="+end_npu_ids)
     if network_backend == 'ns3':
-        astra_args.append("--logical-topology-configuration="+astra_sim+"/inputs/logical_topology/logical_8nodes_1D.json")
-    p = subprocess.Popen(astra_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        astra_args.append("--logical-topology-configuration=" + os.path.join(astra_sim, args.logical_topo_config))
+    p = subprocess.Popen(astra_args)
 
     # DP group synchronization: defer trace generation until all members have scheduled
     # dp_groups maps dp_group_name -> list of instance_ids
@@ -654,9 +662,8 @@ def main():
 
     # Starting simulation, one while loop processes one iteration
     while True:
-        
-        out = controller.read_wait(p)
-        out_dict = controller.parse_output(out[-2])
+        out_dict = controller.read_wait()
+        print(out_dict)
         
         if out_dict != None:
             sys = out_dict['sys']
@@ -682,6 +689,8 @@ def main():
         if sys == inst2npu_mapping[instance_id] and not waiting_request[instance_id]:
             last_end_time[instance_id] = current
             waiting_request[instance_id] = True
+
+        on_doing[sys] = False
 
         # check request is done
         prompt_t, gen_t, finished_reqs = schedulers[instance_id].add_done(id, sys, current)
@@ -822,7 +831,6 @@ def main():
             # second time.
             built_here = len(new_req.fired) == 1  # implies sys is the start NPU
             if built_here:  # first NPU of the instance, opening a new batch
-                waiting_request[instance_id] = False
                 instance = instances[instance_id]
                 dg = inst_dp_group.get(instance_id)
 
@@ -912,7 +920,8 @@ def main():
                                    trace=trace_data)
                     workload = get_workload(new_req, instance["hardware"], instance_id,
                                             inputs_root=run_paths.inputs_root)
-                    controller.write_flush(p, workload)
+                    controller.write_cmd(f"add_workload {workload}")
+                    on_doing[sys] = True
             else:
                 # Joined an existing batch: pick up its workload. workload_name
                 # matters for a DP batch, whose graph lives in the group's shared
@@ -929,8 +938,6 @@ def main():
                 # the round is assembled. The instance is necessarily already in
                 # ``dp_pending`` (the batch exists because its first NPU built
                 # it), so passing here cannot stall the barrier.
-                if sys == inst2npu_mapping[instance_id]:
-                    waiting_request[instance_id] = False
                 if instance_id in inst_dp_group and new_req.workload_name is None:
                     new_req.fired.remove(sys)
                     controller.write_flush(p, _pass_response(router, current, state_changed=True))
@@ -939,7 +946,8 @@ def main():
                     workload = get_workload(new_req, instances[instance_id]["hardware"], instance_id,
                                             workload_name=new_req.workload_name,
                                             inputs_root=run_paths.inputs_root)
-                    controller.write_flush(p, workload)
+                    controller.write_cmd(f"add_workload {workload}")
+                    on_doing[sys] = True
 
         # check time to store throughput (only print on start NPU to avoid transient states)
         if current > last_log + INTERVAL and sys == inst2npu_mapping[instance_id]:
@@ -1098,23 +1106,31 @@ def main():
 
                 print_rule()
                 print_markup("[sim.heading]▶ Exiting simulation...[/]\n")
-                controller.write_flush(p, "exit")
+                controller.write_cmd("exit")
                 break
-            controller.write_flush(p, "done") # make done instances to sleep
+            controller.write_cmd("done") # make done instances to sleep
         elif new_req == None and not responded:
             # If all instances are idle but deferred sessions have pending
             # requests with future arrival times (tool calls still running),
             # advance current time so the next iteration can pick them up.
             # Built before the jump below: _pass_response compares against
             # the clock ASTRA-Sim is actually at, not the one we skip to.
-            pass_msg = _pass_response(router, current)
+            # pass_msg = _pass_response(router, current)
+            # controller.write_flush(p, pass_msg)
+            next_arrival = None
             if router.has_deferred_sessions() or router.has_pending_requests():
                 next_arrival = router.get_next_pending_arrival()
-                if next_arrival is not None and next_arrival > current:
-                    current = next_arrival
-            # controller.write_flush(p, pass_msg)
-            controller.write_flush(p, "pass")
-        
+
+            if sys != inst2npu_mapping[instance_id]: # End npu
+                controller.write_cmd(f"wait {sys - 1}")
+            else: # Start npu
+                if on_doing[sys + 1]:
+                    controller.write_cmd(f"wait {sys + 1}")
+                    print(f"Wait {instance_id}")
+                elif next_arrival is not None and next_arrival > current:
+                    controller.write_cmd(f"sleep {next_arrival - current}")
+                else:
+                    controller.write_cmd("pass")
         # flush
         flush.stdout.flush()
 
