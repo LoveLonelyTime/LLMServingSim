@@ -28,6 +28,7 @@ from serving.core.power_model import *
 from serving.core.logger import *
 from serving.core.run_paths import build_run_paths, resolve_run_id
 import sys as flush
+from tqdm import tqdm
 
 from pyinstrument import Profiler
 
@@ -437,12 +438,12 @@ def main():
     # If you want to set more specific information such as latency, look at config.py and each json file
     if network_backend == 'analytical':
         network=run_paths.network_config
-        binary=os.path.join(astra_sim, "build/astra_analytical/build/AnalyticalAstra/bin/AnalyticalAstra")
+        binary=os.path.join(astra_sim, "build/astra_analytical/build/AstraCongestion/bin/AstraCongestion")
     elif network_backend == 'ns3':
         network=_prepare_ns3_config(astra_sim, run_paths, args.topo_config)
         # Enable debug
         # binary=os.path.join(astra_sim, "extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-default")
-        binary=os.path.join(astra_sim, "extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-debug")
+        binary=os.path.join(astra_sim, "extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-optimized")
     else:
         raise NotImplementedError("Only analytical and ns3 network backend are supported")
     memory=run_paths.memory_config
@@ -630,14 +631,28 @@ def main():
     # set first workload file
     workload = get_workload(None, None, event=True, inputs_root=run_paths.inputs_root)
     # run subprocess
-    astra_args = [binary, "--zmq-addr="+ZMQ_ADDR, "--workload-configuration="+workload, "--system-configuration="+system, "--network-configuration="+network, "--memory-configuration="+memory]
+    
+    astra_args = [binary, 
+                  "--zmq-addr="+ZMQ_ADDR, 
+                  "--workload-configuration="+workload, 
+                  "--system-configuration="+system, 
+                  "--network-configuration="+network, 
+                  "--memory-configuration="+memory,
+                  "--node-npu-ids=" + (",".join([str(inst2node_mapping[npu2inst_mapping[npu]]) for npu in range(total_npu)]) + ","),
+                  "--instance-npu-ids=" + (",".join([str(npu2inst_mapping[npu]) for npu in range(total_npu)]) + ","),
+                  "--inner-npu-ids=" + (",".join([str(npu - inst2npu_mapping[npu2inst_mapping[npu]]) for npu in range(total_npu)]) + ","),
+                  ]
     if start_npu_ids != "":
         astra_args.append("--start-npu-ids="+start_npu_ids)
     if end_npu_ids != "":
         astra_args.append("--end-npu-ids="+end_npu_ids)
     if network_backend == 'ns3':
         astra_args.append("--logical-topology-configuration=" + os.path.join(astra_sim, args.logical_topo_config))
+
+    print(astra_args)
     p = subprocess.Popen(astra_args)
+
+    # perf_p = subprocess.Popen(["/app/LLMServingSim/perf", "record", "-F" ,"999" ,"-g" ,"-p", f"{p.pid}"])
 
     # DP group synchronization: defer trace generation until all members have scheduled
     # dp_groups maps dp_group_name -> list of instance_ids
@@ -660,15 +675,19 @@ def main():
     print_markup("[sim.heading]▶ Starting simulation...[/]\n")
     flush.stdout.flush()
 
+    # Create progress bar
+    pbar = tqdm(total=len(router._pending_requests), desc="Req")
+
     # Starting simulation, one while loop processes one iteration
     while True:
         out_dict = controller.read_wait()
-        print(out_dict)
         
         if out_dict != None:
             sys = out_dict['sys']
             id = out_dict['id']
             current = out_dict['cycle']
+
+        pbar.set_description(f"Cyc: {current}")
 
         # Route newly arrived requests to instances based on current load
         if dataset is not None:
@@ -700,7 +719,9 @@ def main():
         gen_th += gen_t
         total_gen += gen_t
         # count only finished requests
-        req_cnt += len(finished_reqs) if instances[instance_id]["pd_type"] != "prefill" else 0
+        req_cnt_incr = len(finished_reqs) if instances[instance_id]["pd_type"] != "prefill" else 0
+        req_cnt += req_cnt_incr
+        pbar.update(req_cnt_incr)
 
         # Notify router of completed requests for dependency chain release
         if instances[instance_id]["pd_type"] != "prefill":
@@ -1097,6 +1118,8 @@ def main():
 
             # check if all instances are done
             if len(done_instance) == num_instances:
+                pbar.close()
+
                 for inst_idx in range(num_instances):
                     schedulers[inst_idx].memory.free_prefix_cache()
                     schedulers[inst_idx].memory.free_weight()
@@ -1126,9 +1149,8 @@ def main():
             else: # Start npu
                 if on_doing[sys + 1]:
                     controller.write_cmd(f"wait {sys + 1}")
-                    print(f"Wait {instance_id}")
                 elif next_arrival is not None and next_arrival > current:
-                    controller.write_cmd(f"sleep {next_arrival - current}")
+                    controller.write_cmd(f"sleep {next_arrival}")
                 else:
                     controller.write_cmd("pass")
         # flush
@@ -1245,4 +1267,7 @@ if __name__ == "__main__":
     # profiler.start()
     main()
     # profiler.stop()
-    # print(profiler.output_text(unicode=True, color=True))
+    # print(profiler.output_text(unicode=True, color=True, show_all=True))
+
+    # with open("profile_full.html", "w") as f:
+    #     f.write(profiler.output_html())

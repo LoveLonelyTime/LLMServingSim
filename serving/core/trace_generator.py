@@ -1025,8 +1025,11 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
 
     wt_loc = get_device(ctx.placement, layer_num, layer_name, "weights")
 
-    lines.append((layer_name, str(latency_ns), input_loc, str(inp), wt_loc,
-                  str(wt), output_loc, str(out), comm_type, str(comm_size), batch_tag))
+    # We add layer number and the current batch size (for cross-instance
+    # stealing analysis: event name becomes <op>_L<layer>_<batch_size>).
+    lines.append((f"{layer_name}_L{layer_num}_{bctx.lm_head_len}", str(latency_ns), input_loc,
+                  str(inp), wt_loc, str(wt), output_loc, str(out), comm_type,
+                  str(comm_size), batch_tag))
 
     if power_acc is not None:
         power_acc.npu_latencies_ns.append(latency_ns)

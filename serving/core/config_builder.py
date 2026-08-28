@@ -619,7 +619,8 @@ def build_cluster_config(astra_sim, cluster_config_path, enable_local_offloading
             layer = {}
 
             # Apply block overrides if any
-            block_mode = False # if weights differ in blocks, we can not copy and paste the same trace for all layers
+            # To trace different layer, we enable block_mode.
+            block_mode = True # if weights differ in blocks, we can not copy and paste the same trace for all layers
             for rule in (placement_cfg.get("blocks") or []):
                 ids = _parse_blocks_expr(rule.get("blocks", ""), num_hidden_layers)
                 if not ids:
@@ -727,10 +728,11 @@ def _create_network_config(network_config_path, instances, link_bw, link_latency
     dims = _compute_network_dims(instances)
     num_dims = len(dims)
     topology_data = {
-        "topology": FlowStyleList(["FullyConnected"] * num_dims),
+        "topology": FlowStyleList(["Mesh2D"] * num_dims),
         "npus_count": FlowStyleList(dims),
         "bandwidth": _normalize_network_dim_values(link_bw, num_dims, "link_bw"),
         "latency": _normalize_network_dim_values(link_latency, num_dims, "link_latency"),
+        "physical_topo": "0-1,1-2,2-3,3-4,4-5,6-7,7-8,8-9,9-10,10-11,12-13,13-14,14-15,15-16,16-17,0-6,6-12,1-7,7-13,2-8,8-14,3-9,9-15,4-10,10-16,5-11,11-17"
     }
 
     with open(network_config_path, 'w') as yaml_file:
